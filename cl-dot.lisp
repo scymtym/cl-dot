@@ -26,9 +26,18 @@
 (defclass attributes-mixin ()
   ((attributes :initform nil :initarg :attributes :accessor attributes-of)))
 
-(defclass graph (attributes-mixin)
+(defclass basic-graph (attributes-mixin)
   ((nodes :initform nil :initarg :nodes :accessor nodes-of)
-   (edges :initform nil :initarg :edges :accessor edges-of)))
+   (clusters :initform '() :initarg :clusters :accessor clusters-of)))
+
+(defclass graph (basic-graph)
+  ((edges :initform nil :initarg :edges :accessor edges-of)))
+
+(defclass cluster (id-mixin
+                   basic-graph)
+  ()
+  (:documentation "A subgraph containing nodes and nested subgraphs
+with `dot` attributes."))
 
 (defclass node (id-mixin
                 attributes-mixin)
@@ -119,28 +128,40 @@ part of the graph, but which it has no direct connections to.")
   (:method (graph (object t))
     '()))
 
+(defgeneric graph-object-contains (graph object)
+  (:documentation
+   "Returns a sequence of objects that the CLUSTER corresponding to
+ OBJECT should contain.
+
+If a non-empty sequence is returned, (GRAPH-OBJECT-NODE GRAPH OBJECT)
+has to return a CLUSTER instance.")
+  (:method (graph object)
+    '()))
+
+(defgeneric graph-object-contained-by (graph object)
+  (:documentation
+   "Returns an object the corresponding CLUSTER of which should
+contain the NODE corresponding to OBJECT or NIL.
+
+If a non-nil object, say CONTAINER, is returned,
+(GRAPH-OBJECT-NODE GRAPH CONTAINER) has to return a CLUSTER
+instance.")
+  (:method (graph object)
+    nil))
+
 ;;; Public interface
 
 (defgeneric generate-graph-from-roots (graph objects &optional attributes)
   (:documentation "Constructs a GRAPH with ATTRIBUTES starting
 from OBJECTS, using the GRAPH-OBJECT- protocol.")
   (:method (graph objects &optional attributes)
-    (multiple-value-bind (nodes edges)
-        (construct-graph graph objects)
-      (make-instance 'graph
-                     :attributes attributes
-                     :nodes nodes
-                     :edges edges))))
+    (construct-graph graph objects attributes)))
 
 (defun print-graph (graph &rest options
                     &key (stream *standard-output*) (directed t))
   "Prints a dot-format representation GRAPH to STREAM."
   (declare (ignore stream directed))
-  (apply #'generate-dot
-         (nodes-of graph)
-         (edges-of graph)
-         (attributes-of graph)
-         options))
+  (apply #'generate-dot graph options))
 
 (defun dot-graph (graph outfile &key (format :ps) (directed t))
   "Renders GRAPH to OUTFILE by running the program in \*DOT-PATH* or
@@ -159,11 +180,46 @@ FORMAT is Postscript."
                       :input (make-string-input-stream dot-string)
                       :output *standard-output*)))
 
+(defmethod graph-object-node ((graph (eql :debug)) (node graph))
+  (make-instance 'node :attributes (list :label (princ-to-string node))))
+
+(defmethod graph-object-node ((graph (eql :debug)) (node t))
+  (make-instance 'node :attributes (list :label (format nil "~A\\n~A"
+                                                        (princ-to-string node)
+                                                        (id-of node)))))
+
+(defmethod graph-object-points-to ((graph (eql :debug)) (node cluster))
+  (nodes-of node))
+
+(defmethod graph-object-points-to ((graph (eql :debug)) (node graph))
+  (nodes-of node))
+
+(defvar *debug* nil) ; TODO remove
+
 ;;; Internal
-(defun construct-graph (graph objects)
-  (let ((handled-objects (make-hash-table))
-        (nodes nil)
-        (edges nil)
+
+(defun filter-cluster-attributes (cluster)
+  (setf (attributes-of cluster)
+        (remove-unknown-attributes (attributes-of cluster) *cluster-attributes*))
+  cluster)
+
+(defun cluster->node (cluster)
+  (let* ((attributes (attributes-of cluster))
+         (shape (getf attributes :shape)))
+    (change-class cluster 'node
+                  :attributes (if shape
+                                  attributes
+                                  (list* :shape :box attributes)))))
+
+(defun check-node-type (node expected-type &optional reason)
+  (unless (typep node expected-type)
+    (error "~@<Node ~A is not of type ~S~@[~A~]~@:>"
+           node expected-type reason)))
+
+;; TODO prevent subgraph cycles
+(defun construct-graph (graph objects attributes)
+  (let ((result (make-instance 'graph :attributes attributes))
+        (handled-objects (make-hash-table))
         (*id* 0))
     (labels ((add-edge (source target attributes &optional source-port target-port)
                (let ((edge (make-instance 'edge
@@ -172,93 +228,176 @@ FORMAT is Postscript."
                                           :source-port source-port
                                           :target target
                                           :target-port target-port)))
-                 (push edge edges)))
+                 (push edge (edges-of result))))
+             (connect (node neighbor direction)
+               (multiple-value-bind (neighbor found?
+                                     attributes source-port target-port)
+                   (get-node neighbor)
+                 (when found?
+                   (multiple-value-call #'add-edge
+                     (ecase direction
+                       (:outgoing (values node neighbor))
+                       (:incoming (values neighbor node)))
+                     attributes source-port target-port))))
              (get-node (object)
                (if (typep object 'attributed)
                    (multiple-value-call #'values
                      (get-node (object-of object))
+                     (attributes-of object)
                      (source-port-of object)
                      (target-port-of object))
                    (gethash object handled-objects)))
              (get-attributes (object)
                (when (typep object 'attributed)
                  (attributes-of object)))
+             (ensure-parent (object)
+               (or (when object (handle-object object)) result))
              (handle-object (object)
-               (when (typep object 'attributed)
-                 (return-from handle-object
-                   (handle-object (object-of object))))
-               ;; If object has been already been visited, skip
-               (unless (nth-value 1 (get-node object))
-                 (let ((node (graph-object-node graph object))
-                       (knows-of (graph-object-knows-of graph object))
-                       (points-to (graph-object-points-to graph object))
-                       (pointed-to (graph-object-pointed-to-by graph object)))
-                   (setf (gethash object handled-objects) node)
-                   (map nil #'handle-object knows-of)
-                   (map nil #'handle-object points-to)
-                   (map nil #'handle-object pointed-to)
-                   (when node
-                     (push node nodes)
-                     (map nil
-                          (lambda (to)
-                            (multiple-value-bind (target found? source-port target-port)
-                                (get-node to)
-                              (when found?
-                                (add-edge node target (get-attributes to)
-                                          source-port target-port))))
-                          points-to)
-                     (map nil
-                          (lambda (from)
-                            (multiple-value-bind (source found? source-port target-port)
-                                (get-node from)
-                              (when found?
-                                (add-edge source node (get-attributes from)
-                                          source-port target-port))))
-                          pointed-to)))))
-             (handle-edge (from to &optional attributes)
-               (handle-object from)
-               (handle-object to)
-               (let ((source (get-node from))
-                     (target (get-node to)))
-                 (add-edge source target attributes))))
-      (map nil #'handle-object objects)
-      (map nil
-           (lambda (edge-spec)
-             (apply #'handle-edge edge-spec))
-           (graph-object-edges graph))
-      (values nodes edges))))
+               ;; TODO don't bail out early since parent - child relations may not have been set up?
+               (cond
+                 ((typep object 'attributed)
+                  (handle-object (object-of object)))
+                 ;; Object has been already been visited => skip
+                 ((nth-value 1 (get-node object)) ; TODO simplify
+                  (get-node object))
+                 ;; Not visited => handle
+                 (t
+                  (let ((node (graph-object-node graph object)))
+                    (setf (gethash object handled-objects) node)
 
-(defun generate-dot (nodes edges attributes
-                     &key (stream *standard-output*) (directed t))
-  (with-standard-io-syntax ()
-    (let ((*standard-output* (or stream *standard-output*))
-          (*print-right-margin* 65535)
-          (edge-op (if directed "->" "--"))
-          (graph-type (if directed "digraph" "graph"))
-          (node-defaults '())
-          (edge-defaults '()))
-      (format stream "~a {~%" graph-type)
-      (loop for (name value) on attributes by #'cddr do
-           (case name
-             (:node
-              (setf node-defaults (append node-defaults value)))
-             (:edge
-              (setf edge-defaults (append edge-defaults value)))
-             (t
-              (print-key-value stream name value *graph-attributes*)
-              (format stream ";~%"))))
-      ;; Default attributes.
-      (print-defaults stream "node" node-defaults *node-attributes*)
-      (print-defaults stream "edge" edge-defaults *edge-attributes*)
-      ;; Nodes and edges.
-      (dolist (node nodes)
-        (format stream "  ~a " (textify (id-of node)))
-        (print-attributes stream (attributes-of node) *node-attributes*)
-        (format stream ";~%"))
-      (dolist (edge edges)
-        (print-edge stream edge edge-op))
-      (format stream "}")
-      (values))))
+                    (mapc #'handle-object (graph-object-knows-of graph object))
+                    (let* ((points-to  (graph-object-points-to graph object))
+                           (pointed-to (graph-object-pointed-to-by graph object))
+                           (parent     (ensure-parent
+                                        (graph-object-contained-by graph object)))
+                           (children   (remove nil ; TODO ugly
+                                               (mapcar #'handle-object
+                                                       (graph-object-contains graph object)))))
+                      (mapc #'handle-object points-to)
+                      (mapc #'handle-object pointed-to)
+                      (when node
+                        ;; Add to parent cluster, if any.
+                        (check-node-type parent '(or graph cluster)
+                                         " but contains nodes")
+                        (pushnew node (nodes-of parent))
+                        ;; If NODE contains children, remove them from
+                        ;; the global node list and add them to NODE.
+                        (when children
+                          (check-node-type node 'cluster " but contains nodes")
+                          (mapc (lambda (child)
+                                  (setf (nodes-of result) (remove child (nodes-of result))) ; TODO or explicit orphan list
+                                  (pushnew child (nodes-of node)))
+                                children))
+                        ;; Add edges.
+                        (map nil (lambda (to) (connect node to :outgoing))
+                             points-to)
+                        (map nil (lambda (from) (connect node from :incoming))
+                             pointed-to)
+                        node))))))
+             (handle-edge (edge-spec)
+               (destructuring-bind (from to &optional attributes) edge-spec
+                 (handle-object from)
+                 (handle-object to)
+                 (add-edge (get-node from) (get-node to) attributes))))
+      ;; Traverse objects starting from the roots OBJECTS.
+      (map nil #'handle-object objects)
+      ;; Add explicitly specified edges.
+      (map nil #'handle-edge (graph-object-edges graph))
+
+      #+no (unless *debug*
+        (let ((*debug* t))
+          (dot-graph (generate-graph-from-roots :debug (list result)) "/tmp/debug.png" :format :png)))
+
+      ;; Recursively, change `cluster' instances that turned out to
+      ;; contain no nodes to `node' instances since GraphViz does not
+      ;; allow empty clusters.
+      (labels ((remove-empty-clusters (cluster)
+                 ; (describe cluster *error-output*)
+                 (assert (typep cluster '(or graph cluster)))
+                 (assert (null (clusters-of cluster)))
+                 (let ((children)
+                       (nodes))
+                   (mapc (lambda (child) ; TODO loop + collect?
+                           (multiple-value-bind (child child-nodes)
+                               (if (typep child 'cluster)
+                                   (remove-empty-clusters child)
+                                   (values nil (list child)))
+                             (if child
+                                 (push child children)
+                                 (setf nodes (append nodes child-nodes)))))
+                         (nodes-of cluster))
+                   (setf (clusters-of cluster) children
+                         (nodes-of cluster)    nodes)
+                   ; (print (list cluster children nodes) *error-output*)
+                   (cond
+                     ((typep cluster 'graph)
+                      cluster)
+                     ((or (clusters-of cluster) (nodes-of cluster))
+                      (assert (typep cluster 'cluster))
+                      (filter-cluster-attributes cluster))
+                     (t
+                      (values nil (list* (cluster->node cluster) nodes)))))))
+        (multiple-value-bind (cluster extra-nodes)
+            (remove-empty-clusters result) ; TODO can add extra node
+          (describe cluster *error-output*)
+          (assert (null extra-nodes)) ; TODO just return first value once this is tested
+          cluster)))))
+
+(defun generate-dot (graph &key (stream *standard-output*) (directed t))
+  (labels ((do-cluster (cluster)
+             (do-graph cluster :subgraph (id-of cluster)))
+           (do-graph (graph &key subgraph (node-defaults '()) (edge-defaults '()))
+             (let ((remaining-nodes (copy-list (nodes-of graph)))
+                   (processed-nodes '())
+                   (attributes (attributes-of graph))
+                   (edge-op (if directed "->" "--"))
+                   (graph-type (cond
+                                 (subgraph "subgraph")
+                                 (directed "digraph")
+                                 (t        "graph"))))
+               ;; Header, attributes and node + edge defaults.
+               (format stream "~a~@[ cluster_~A~] {~%" graph-type subgraph)
+               (loop for (name value) on attributes by #'cddr do
+                    (case name
+                      (:node
+                       (setf node-defaults (append node-defaults value)))
+                      (:edge
+                       (setf edge-defaults (append edge-defaults value)))
+                      (t
+                       (print-key-value stream name value
+                                        (if subgraph
+                                            *cluster-attributes*
+                                            *graph-attributes*))
+                       (format stream ";~%"))))
+               ;; Default attributes.
+               (print-defaults stream "node" node-defaults *node-attributes*)
+               (print-defaults stream "edge" edge-defaults *edge-attributes*)
+               ;; Clusters.
+               (mapc (lambda (cluster)
+                       (let ((nodes (do-cluster cluster)))
+                         (setf remaining-nodes (set-difference
+                                                remaining-nodes nodes)
+                               processed-nodes (append
+                                                processed-nodes nodes))))
+                     (clusters-of graph))
+               ;; Remaining nodes and all edges.
+               (dolist (node remaining-nodes)
+                 (format stream "  ~a " (textify (id-of node)))
+                 (print-attributes stream (attributes-of node) *node-attributes*)
+                 (format stream ";~%"))
+               (unless subgraph
+                 (dolist (edge (edges-of graph))
+                   (print-edge stream edge edge-op)))
+               ;; Footer.
+               (format stream "}~%")
+               ;; Return processed nodes so containing graph can skip
+               ;; them.
+               (append processed-nodes remaining-nodes))))
+    (with-standard-io-syntax
+      (let ((*standard-output* (or stream *standard-output*))
+            (*print-right-margin* 65535))
+        (do-graph graph)
+        (values)))))
 
 (defgeneric print-edge (stream edge edge-op))
 
@@ -268,16 +407,44 @@ FORMAT is Postscript."
 
 (defgeneric print-edge-using-nodes (stream edge edge-op source target))
 
-(defmethod print-edge-using-nodes (stream (edge edge) (edge-op t)
-                                   (source node) (target node))
-  (format stream "  ")
-  (print-edge-nodes stream
-                    (id-of source) (source-port-of edge)
-                    edge-op
-                    (id-of target) (target-port-of edge))
-  (format stream " ")
-  (print-attributes stream (attributes-of edge) *edge-attributes*)
-  (format stream ";~%"))
+;; For edges between clusters and clusters/nodes, see
+;; http://www.graphviz.org/content/FaqClusterEdge
+(defmethod print-edge-using-nodes (stream (edge edge) edge-op source target)
+  (multiple-value-bind (source-node-id source-port source-edge-attach)
+      (attach-information-of edge source :source)
+    (multiple-value-bind (target-node-id target-port target-edge-attach)
+        (attach-information-of edge target :target)
+      (format stream "  ")
+      (print-edge-nodes
+       stream source-node-id source-port edge-op target-node-id target-port)
+      (format stream " ")
+      (print-attributes stream (append (when source-edge-attach
+                                         (list :ltail source-edge-attach))
+                                       (when target-edge-attach
+                                         (list :lhead target-edge-attach))
+                                       (attributes-of edge))
+                        *edge-attributes*)
+      (format stream ";~%"))))
+
+(defgeneric attach-information-of (edge node end))
+
+(defmethod attach-information-of ((edge edge) (node node) end)
+  (values (id-of node)
+          (ecase end
+            (:source (source-port-of edge))
+            (:target (target-port-of edge)))))
+
+(defmethod attach-information-of ((edge edge) (node cluster) end)
+  (ecase end
+    (:source (when (source-port-of edge) (error "TODO not supported")))
+    (:target (when (target-port-of edge) (error "TODO not supported"))))
+  (values (id-of (cluster-attachable-node node)) ; TODO always available?
+          nil
+          (format nil "cluster_~A" (id-of node))))
+
+(defun cluster-attachable-node (cluster)
+  (or (first (nodes-of cluster))
+      (some #'cluster-attachable-node (clusters-of cluster))))
 
 (defun print-edge-nodes (stream source source-port edge-op target target-port)
   (format stream "~a~@[:~a~] ~a ~a~@[:~a~]"
