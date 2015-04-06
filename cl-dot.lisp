@@ -256,14 +256,34 @@ FORMAT is Postscript."
         (print-attributes stream (attributes-of node) *node-attributes*)
         (format stream ";~%"))
       (dolist (edge edges)
-        (format stream "  ~a~@[:~a~] ~a ~a~@[:~a~]"
-                (textify (id-of (source-of edge))) (source-port-of edge)
-                edge-op
-                (textify (id-of (target-of edge))) (target-port-of edge))
-        (print-attributes stream (attributes-of edge) *edge-attributes*)
-        (format stream ";~%"))
+        (print-edge stream edge edge-op))
       (format stream "}")
       (values))))
+
+(defgeneric print-edge (stream edge edge-op))
+
+(defmethod print-edge ((stream t) (edge edge) (edge-op t))
+  (print-edge-using-nodes
+   stream edge edge-op (source-of edge) (target-of edge) ))
+
+(defgeneric print-edge-using-nodes (stream edge edge-op source target))
+
+(defmethod print-edge-using-nodes (stream (edge edge) (edge-op t)
+                                   (source node) (target node))
+  (format stream "  ")
+  (print-edge-nodes stream
+                    (id-of source) (source-port-of edge)
+                    edge-op
+                    (id-of target) (target-port-of edge))
+  (format stream " ")
+  (print-attributes stream (attributes-of edge) *edge-attributes*)
+  (format stream ";~%"))
+
+(defun print-edge-nodes (stream source source-port edge-op target target-port)
+  (format stream "~a~@[:~a~] ~a ~a~@[:~a~]"
+          (textify source) source-port
+          edge-op
+          (textify target) target-port))
 
 (defun print-defaults (stream kind attributes schema)
   (when attributes
