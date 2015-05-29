@@ -369,7 +369,7 @@ FORMAT is Postscript."
                (append processed-nodes remaining-nodes))))
     (with-standard-io-syntax
       (let ((*standard-output* (or stream *standard-output*))
-            (*print-right-margin* 65535))
+            (*print-right-margin* most-positive-fixnum))
         (do-graph graph)
         (values)))))
 
