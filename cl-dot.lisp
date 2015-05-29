@@ -320,7 +320,7 @@ FORMAT is Postscript."
 (defun generate-dot (graph &key (stream *standard-output*) (directed t))
   (labels ((do-cluster (cluster)
              (do-graph cluster :subgraph (id-of cluster)))
-           (do-graph (graph &key subgraph (node-defaults '()) (edge-defaults '()))
+           (do-graph (graph &key subgraph (node-defaults '()) (edge-defaults '())) ; TODO separate commit: logical block
              (let ((remaining-nodes (copy-list (nodes-of graph)))
                    (processed-nodes '())
                    (attributes (attributes-of graph))
