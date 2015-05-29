@@ -180,22 +180,6 @@ FORMAT is Postscript."
                       :input (make-string-input-stream dot-string)
                       :output *standard-output*)))
 
-(defmethod graph-object-node ((graph (eql :debug)) (node graph))
-  (make-instance 'node :attributes (list :label (princ-to-string node))))
-
-(defmethod graph-object-node ((graph (eql :debug)) (node t))
-  (make-instance 'node :attributes (list :label (format nil "~A\\n~A"
-                                                        (princ-to-string node)
-                                                        (id-of node)))))
-
-(defmethod graph-object-points-to ((graph (eql :debug)) (node cluster))
-  (nodes-of node))
-
-(defmethod graph-object-points-to ((graph (eql :debug)) (node graph))
-  (nodes-of node))
-
-(defvar *debug* nil) ; TODO remove
-
 ;;; Internal
 
 (defun filter-cluster-attributes (cluster)
@@ -304,15 +288,10 @@ FORMAT is Postscript."
       ;; Add explicitly specified edges.
       (map nil #'handle-edge (graph-object-edges graph))
 
-      #+no (unless *debug*
-        (let ((*debug* t))
-          (dot-graph (generate-graph-from-roots :debug (list result)) "/tmp/debug.png" :format :png)))
-
       ;; Recursively, change `cluster' instances that turned out to
       ;; contain no nodes to `node' instances since GraphViz does not
       ;; allow empty clusters.
       (labels ((remove-empty-clusters (cluster)
-                 ; (describe cluster *error-output*)
                  (assert (typep cluster '(or graph cluster)))
                  (assert (null (clusters-of cluster)))
                  (let ((children)
@@ -328,7 +307,6 @@ FORMAT is Postscript."
                          (nodes-of cluster))
                    (setf (clusters-of cluster) children
                          (nodes-of cluster)    nodes)
-                   ; (print (list cluster children nodes) *error-output*)
                    (cond
                      ((typep cluster 'graph)
                       cluster)
@@ -337,11 +315,7 @@ FORMAT is Postscript."
                       (filter-cluster-attributes cluster))
                      (t
                       (values nil (list* (cluster->node cluster) nodes)))))))
-        (multiple-value-bind (cluster extra-nodes)
-            (remove-empty-clusters result) ; TODO can add extra node
-          (describe cluster *error-output*)
-          (assert (null extra-nodes)) ; TODO just return first value once this is tested
-          cluster)))))
+        (remove-empty-clusters result)))))
 
 (defun generate-dot (graph &key (stream *standard-output*) (directed t))
   (labels ((do-cluster (cluster)
