@@ -388,17 +388,17 @@ FORMAT is Postscript."
       (attach-information-of edge source :source)
     (multiple-value-bind (target-node-id target-port target-edge-attach)
         (attach-information-of edge target :target)
-      (format stream "  ")
-      (print-edge-nodes
-       stream source-node-id source-port edge-op target-node-id target-port)
-      (format stream " ")
-      (print-attributes stream (append (when source-edge-attach
-                                         (list :ltail source-edge-attach))
-                                       (when target-edge-attach
-                                         (list :lhead target-edge-attach))
-                                       (attributes-of edge))
-                        *edge-attributes*)
-      (format stream ";~%"))))
+      (let ((attributes (append (when source-edge-attach
+                                  (list :ltail source-edge-attach))
+                                (when target-edge-attach
+                                  (list :lhead target-edge-attach))
+                                (attributes-of edge))))
+        (format stream "  ")
+        (print-edge-nodes
+         stream source-node-id source-port edge-op target-node-id target-port)
+        (format stream " ")
+        (print-attributes stream attributes *edge-attributes*)
+        (format stream ";~%")))))
 
 (defgeneric attach-information-of (edge node end))
 
