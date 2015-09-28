@@ -231,11 +231,16 @@ FORMAT is Postscript."
                      (source-port-of object)
                      (target-port-of object))
                    (gethash object handled-objects)))
-             (get-attributes (object)
+             (get-attributes (object)   ; TODO unused
                (when (typep object 'attributed)
                  (attributes-of object)))
-             (ensure-parent (object)
-               (or (when object (handle-object object)) result))
+             (ensure-object (object)
+               (cond
+                 ((and object (handle-object object))
+                  (values (handle-object object) object))
+                 ((when object (graph-object-contained-by graph object))
+                  (ensure-object (graph-object-contained-by graph object)))
+                 (t result)))
              (handle-object (object)
                ;; TODO don't bail out early since parent - child relations may not have been set up?
                (cond
@@ -252,26 +257,32 @@ FORMAT is Postscript."
                     (mapc #'handle-object (graph-object-knows-of graph object))
                     (let* ((points-to  (graph-object-points-to graph object))
                            (pointed-to (graph-object-pointed-to-by graph object))
-                           (parent     (ensure-parent
+                           (parent     (ensure-object
                                         (graph-object-contained-by graph object)))
                            (children   (remove nil ; TODO ugly
                                                (mapcar #'handle-object
-                                                       (graph-object-contains graph object)))))
-                      (mapc #'handle-object points-to)
-                      (mapc #'handle-object pointed-to)
+                                                       (graph-object-contains graph object))))
+                           (points-to  (remove nil (mapcar (lambda (neighbor)
+                                                             (nth-value 1 (ensure-object neighbor)))
+                                                           points-to)))
+                           (pointed-to (remove nil (mapcar (lambda (neighbor)
+                                                             (nth-value 1 (ensure-object neighbor)))
+                                                           pointed-to))))
+                      ;; If NODE contains children, remove them from
+                      ;; the global node list and add them to NODE.
+                      (when children
+                        (when node
+                         (check-node-type node 'cluster " but contains nodes"))
+                        (mapc (lambda (child)
+                                (setf (nodes-of result) (remove child (nodes-of result))) ; TODO or explicit orphan list
+                                (pushnew child (nodes-of (or node parent))))
+                              children))
                       (when node
                         ;; Add to parent cluster, if any.
                         (check-node-type parent '(or graph cluster)
                                          " but contains nodes")
                         (pushnew node (nodes-of parent))
-                        ;; If NODE contains children, remove them from
-                        ;; the global node list and add them to NODE.
-                        (when children
-                          (check-node-type node 'cluster " but contains nodes")
-                          (mapc (lambda (child)
-                                  (setf (nodes-of result) (remove child (nodes-of result))) ; TODO or explicit orphan list
-                                  (pushnew child (nodes-of node)))
-                                children))
+
                         ;; Add edges.
                         (map nil (lambda (to) (connect node to :outgoing))
                              points-to)
